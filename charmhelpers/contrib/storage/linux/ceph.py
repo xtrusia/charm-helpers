@@ -1482,6 +1482,14 @@ def send_request_if_needed(request, relation='ceph'):
             relation_set(relation_id=rid, broker_req=request.request)
 
 
+def has_broker_rsp(rid=None, unit=None):
+    rdata = relation_get(rid=rid, unit=unit) or {}
+    broker_rsp = rdata.get(get_broker_rsp_key())
+    if not broker_rsp:
+        return False
+    return True
+
+
 def is_broker_action_done(action, rid=None, unit=None):
     """Check whether broker action has completed yet.
 
