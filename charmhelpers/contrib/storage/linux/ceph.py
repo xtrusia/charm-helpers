@@ -1483,11 +1483,18 @@ def send_request_if_needed(request, relation='ceph'):
 
 
 def has_broker_rsp(rid=None, unit=None):
+    """Return True if the broker_rsp key is 'truthy' (i.e. set to something) in the relation data.
+
+    :param rid: The relation to check (default of None means current relation)
+    :type rid: Union[str, None]
+    :param unit: The remote unit to check (default of None means current unit)
+    :type unit: Union[str, None]
+    :returns: True if broker key exists and is set to something 'truthy'
+    :rtype: bool
+    """
     rdata = relation_get(rid=rid, unit=unit) or {}
     broker_rsp = rdata.get(get_broker_rsp_key())
-    if not broker_rsp:
-        return False
-    return True
+    return True if broker_rsp else False
 
 
 def is_broker_action_done(action, rid=None, unit=None):
