@@ -19,6 +19,7 @@
 #  Nick Moffitt <nick.moffitt@canonical.com>
 #  Matthew Wedgwood <matthew.wedgwood@canonical.com>
 
+import errno
 import os
 import re
 import pwd
@@ -59,6 +60,7 @@ elif __platform__ == "centos":
     )  # flake8: noqa -- ignore F401 for this import
 
 UPDATEDB_PATH = '/etc/updatedb.conf'
+CA_CERT_DIR = '/usr/local/share/ca-certificates'
 
 
 def service_start(service_name, **kwargs):
@@ -193,7 +195,7 @@ def service_pause(service_name, init_dir="/etc/init", initd_dir="/etc/init.d",
         stopped = service_stop(service_name, **kwargs)
     upstart_file = os.path.join(init_dir, "{}.conf".format(service_name))
     sysv_file = os.path.join(initd_dir, service_name)
-    if init_is_systemd():
+    if init_is_systemd(service_name=service_name):
         service('disable', service_name)
         service('mask', service_name)
     elif os.path.exists(upstart_file):
@@ -227,7 +229,7 @@ def service_resume(service_name, init_dir="/etc/init",
     """
     upstart_file = os.path.join(init_dir, "{}.conf".format(service_name))
     sysv_file = os.path.join(initd_dir, service_name)
-    if init_is_systemd():
+    if init_is_systemd(service_name=service_name):
         service('unmask', service_name)
         service('enable', service_name)
     elif os.path.exists(upstart_file):
@@ -257,7 +259,7 @@ def service(action, service_name, **kwargs):
     :param **kwargs: additional params to be passed to the service command in
                     the form of key=value.
     """
-    if init_is_systemd():
+    if init_is_systemd(service_name=service_name):
         cmd = ['systemctl', action, service_name]
     else:
         cmd = ['service', service_name, action]
@@ -281,7 +283,7 @@ def service_running(service_name, **kwargs):
                      units (e.g. service ceph-osd status id=2). The kwargs
                      are ignored in systemd services.
     """
-    if init_is_systemd():
+    if init_is_systemd(service_name=service_name):
         return service('is-active', service_name)
     else:
         if os.path.exists(_UPSTART_CONF.format(service_name)):
@@ -311,8 +313,14 @@ def service_running(service_name, **kwargs):
 SYSTEMD_SYSTEM = '/run/systemd/system'
 
 
-def init_is_systemd():
-    """Return True if the host system uses systemd, False otherwise."""
+def init_is_systemd(service_name=None):
+    """
+    Returns whether the host uses systemd for the specified service.
+
+    @param Optional[str] service_name: specific name of service
+    """
+    if str(service_name).startswith("snap."):
+        return True
     if lsb_release()['DISTRIB_CODENAME'] == 'trusty':
         return False
     return os.path.isdir(SYSTEMD_SYSTEM)
@@ -671,7 +679,7 @@ def check_hash(path, checksum, hash_type='md5'):
 
     :param str checksum: Value of the checksum used to validate the file.
     :param str hash_type: Hash algorithm used to generate `checksum`.
-        Can be any hash alrgorithm supported by :mod:`hashlib`,
+        Can be any hash algorithm supported by :mod:`hashlib`,
         such as md5, sha1, sha256, sha512, etc.
     :raises ChecksumError: If the file fails the checksum
 
@@ -819,7 +827,8 @@ def list_nics(nic_type=None):
     if nic_type:
         for int_type in int_types:
             cmd = ['ip', 'addr', 'show', 'label', int_type + '*']
-            ip_output = subprocess.check_output(cmd).decode('UTF-8')
+            ip_output = subprocess.check_output(
+                cmd).decode('UTF-8', errors='replace')
             ip_output = ip_output.split('\n')
             ip_output = (line for line in ip_output if line)
             for line in ip_output:
@@ -835,7 +844,8 @@ def list_nics(nic_type=None):
                         interfaces.append(iface)
     else:
         cmd = ['ip', 'a']
-        ip_output = subprocess.check_output(cmd).decode('UTF-8').split('\n')
+        ip_output = subprocess.check_output(
+            cmd).decode('UTF-8', errors='replace').split('\n')
         ip_output = (line.strip() for line in ip_output if line)
 
         key = re.compile(r'^[0-9]+:\s+(.+):')
@@ -859,7 +869,8 @@ def set_nic_mtu(nic, mtu):
 def get_nic_mtu(nic):
     """Return the Maximum Transmission Unit (MTU) for a network interface."""
     cmd = ['ip', 'addr', 'show', nic]
-    ip_output = subprocess.check_output(cmd).decode('UTF-8').split('\n')
+    ip_output = subprocess.check_output(
+        cmd).decode('UTF-8', errors='replace').split('\n')
     mtu = ""
     for line in ip_output:
         words = line.split()
@@ -871,7 +882,7 @@ def get_nic_mtu(nic):
 def get_nic_hwaddr(nic):
     """Return the Media Access Control (MAC) for a network interface."""
     cmd = ['ip', '-o', '-0', 'addr', 'show', nic]
-    ip_output = subprocess.check_output(cmd).decode('UTF-8')
+    ip_output = subprocess.check_output(cmd).decode('UTF-8', errors='replace')
     hwaddr = ""
     words = ip_output.split()
     if 'link/ether' in words:
@@ -883,7 +894,7 @@ def get_nic_hwaddr(nic):
 def chdir(directory):
     """Change the current working directory to a different directory for a code
     block and return the previous directory after the block exits. Useful to
-    run commands from a specificed directory.
+    run commands from a specified directory.
 
     :param str directory: The directory path to change to for this context.
     """
@@ -918,9 +929,13 @@ def chownr(path, owner, group, follow_links=True, chowntopdir=False):
     for root, dirs, files in os.walk(path, followlinks=follow_links):
         for name in dirs + files:
             full = os.path.join(root, name)
-            broken_symlink = os.path.lexists(full) and not os.path.exists(full)
-            if not broken_symlink:
+            try:
                 chown(full, uid, gid)
+            except (IOError, OSError) as e:
+                # Intended to ignore "file not found". Catching both to be
+                # compatible with both Python 2.7 and 3.x.
+                if e.errno == errno.ENOENT:
+                    pass
 
 
 def lchownr(path, owner, group):
@@ -1068,10 +1083,37 @@ def install_ca_cert(ca_cert, name=None):
         ca_cert = ca_cert.encode('utf8')
     if not name:
         name = 'juju-{}'.format(charm_name())
-    cert_file = '/usr/local/share/ca-certificates/{}.crt'.format(name)
+    cert_file = '{}/{}.crt'.format(CA_CERT_DIR, name)
     new_hash = hashlib.md5(ca_cert).hexdigest()
     if file_hash(cert_file) == new_hash:
         return
     log("Installing new CA cert at: {}".format(cert_file), level=INFO)
     write_file(cert_file, ca_cert)
     subprocess.check_call(['update-ca-certificates', '--fresh'])
+
+
+def get_system_env(key, default=None):
+    """Get data from system environment as represented in ``/etc/environment``.
+
+    :param key: Key to look up
+    :type key: str
+    :param default: Value to return if key is not found
+    :type default: any
+    :returns: Value for key if found or contents of default parameter
+    :rtype: any
+    :raises: subprocess.CalledProcessError
+    """
+    env_file = '/etc/environment'
+    # use the shell and env(1) to parse the global environments file.  This is
+    # done to get the correct result even if the user has shell variable
+    # substitutions or other shell logic in that file.
+    output = subprocess.check_output(
+        ['env', '-i', '/bin/bash', '-c',
+         'set -a && source {} && env'.format(env_file)],
+        universal_newlines=True)
+    for k, v in (line.split('=', 1)
+                 for line in output.splitlines() if '=' in line):
+        if k == key:
+            return v
+    else:
+        return default

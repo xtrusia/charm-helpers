@@ -3,12 +3,13 @@ import os
 import contextlib
 import unittest
 from copy import copy
-from tests.helpers import patch_open
+from tests.helpers import patch_open, FakeRelation
+
 from testtools import TestCase
 from mock import MagicMock, patch, call
 
 from charmhelpers.fetch import ubuntu as fetch
-from charmhelpers.core.hookenv import flush
+from charmhelpers.core.hookenv import WORKLOAD_STATES, flush
 
 import charmhelpers.contrib.openstack.utils as openstack
 
@@ -160,6 +161,15 @@ class FakeDNS(object):
 
 class OpenStackHelpersTestCase(TestCase):
 
+    def setUp(self):
+        super(OpenStackHelpersTestCase, self).setUp()
+        self.patch(fetch, 'get_apt_dpkg_env', lambda: {})
+        # Make sleep() and log() into noops for testing
+        for funcname in ('charmhelpers.core.decorators.log', 'charmhelpers.core.decorators.time.sleep'):
+            patcher = patch(funcname, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _apt_cache(self):
         # mocks out the apt cache
         def cache_get(package):
@@ -296,11 +306,36 @@ class OpenStackHelpersTestCase(TestCase):
     def test_get_swift_codename_none(self):
         self.assertEquals(openstack.get_swift_codename('1.2.3'), None)
 
+    @patch.object(openstack, 'openstack_release')
+    @patch.object(openstack, 'filter_installed_packages')
+    @patch.object(openstack, 'apt_install')
+    def test_get_installed_os_version_no_package(self, mock_apt_install,
+                                                 mock_filter_installed_packages,
+                                                 mock_openstack_release):
+        mock_openstack_release.return_value = {}
+        print("Checking when none")
+        self.assertEquals(
+            openstack.get_installed_os_version(), None)
+
+    @patch.object(openstack, 'openstack_release')
+    @patch.object(openstack, 'filter_installed_packages')
+    @patch.object(openstack, 'apt_install')
+    def test_get_installed_os_version_with_package(self, mock_apt_install,
+                                                   mock_filter_installed_packages,
+                                                   mock_openstack_release):
+        mock_openstack_release.return_value = {'OPENSTACK_CODENAME': 'wallaby'}
+        print("Checking when wallaby")
+        self.assertEquals(
+            openstack.get_installed_os_version(), 'wallaby')
+
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
-    def test_os_codename_from_package(self, mock_snap_install_requested):
+    def test_os_codename_from_package(self, mock_snap_install_requested,
+                                      mock_get_installed_os_version):
         """Test deriving OpenStack codename from an installed package"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             for pkg, vers in six.iteritems(FAKE_REPO):
                 # test fake repo for all "installed" packages
@@ -311,25 +346,31 @@ class OpenStackHelpersTestCase(TestCase):
                 self.assertEquals(openstack.get_os_codename_package(pkg),
                                   vers['os_release'])
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     @patch('charmhelpers.contrib.openstack.utils.error_out')
     def test_os_codename_from_bad_package_version(self, mocked_error,
-                                                  mock_snap_install_requested):
+                                                  mock_snap_install_requested,
+                                                  mock_get_installed_os_version):
         """Test deriving OpenStack codename for a poorly versioned package"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             openstack.get_os_codename_package('bad-version')
             _e = ('Could not determine OpenStack codename for version 2200.1')
             mocked_error.assert_called_with(_e)
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     @patch('charmhelpers.contrib.openstack.utils.error_out')
     def test_os_codename_from_bad_package(self, mocked_error,
-                                          mock_snap_install_requested):
+                                          mock_snap_install_requested,
+                                          mock_get_installed_os_version):
         """Test deriving OpenStack codename from an unavailable package"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             try:
                 openstack.get_os_codename_package('foo')
@@ -341,25 +382,31 @@ class OpenStackHelpersTestCase(TestCase):
                 'candidate: foo'
             mocked_error.assert_called_with(e)
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     def test_os_codename_from_bad_package_nonfatal(
-            self, mock_snap_install_requested):
+            self, mock_snap_install_requested,
+            mock_get_installed_os_version):
         """Test OpenStack codename from an unavailable package is non-fatal"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             self.assertEquals(
                 None,
                 openstack.get_os_codename_package('foo', fatal=False)
             )
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     @patch('charmhelpers.contrib.openstack.utils.error_out')
     def test_os_codename_from_uninstalled_package(self, mock_error,
-                                                  mock_snap_install_requested):
+                                                  mock_snap_install_requested,
+                                                  mock_get_installed_os_version):
         """Test OpenStack codename from an available but uninstalled pkg"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             try:
                 openstack.get_os_codename_package('cinder-common', fatal=True)
@@ -369,25 +416,31 @@ class OpenStackHelpersTestCase(TestCase):
                  'cinder-common')
             mock_error.assert_called_with(e)
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     def test_os_codename_from_uninstalled_package_nonfatal(
-            self, mock_snap_install_requested):
+            self, mock_snap_install_requested,
+            mock_get_installed_os_version):
         """Test OpenStack codename from avail uninstalled pkg is non fatal"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             self.assertEquals(
                 None,
                 openstack.get_os_codename_package('cinder-common', fatal=False)
             )
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     @patch('charmhelpers.contrib.openstack.utils.error_out')
     def test_os_version_from_package(self, mocked_error,
-                                     mock_snap_install_requested):
+                                     mock_snap_install_requested,
+                                     mock_get_installed_os_version):
         """Test deriving OpenStack version from an installed package"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             for pkg, vers in six.iteritems(FAKE_REPO):
                 if pkg.startswith('bad-'):
@@ -397,13 +450,16 @@ class OpenStackHelpersTestCase(TestCase):
                 self.assertEquals(openstack.get_os_version_package(pkg),
                                   vers['os_version'])
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     @patch('charmhelpers.contrib.openstack.utils.error_out')
     def test_os_version_from_bad_package(self, mocked_error,
-                                         mock_snap_install_requested):
+                                         mock_snap_install_requested,
+                                         mock_get_installed_os_version):
         """Test deriving OpenStack version from an uninstalled package"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             try:
                 openstack.get_os_version_package('foo')
@@ -415,27 +471,38 @@ class OpenStackHelpersTestCase(TestCase):
                 'candidate: foo'
             mocked_error.assert_called_with(e)
 
+    @patch.object(openstack, 'get_installed_os_version')
     @patch.object(openstack, 'snap_install_requested')
     def test_os_version_from_bad_package_nonfatal(
-            self, mock_snap_install_requested):
+            self, mock_snap_install_requested,
+            mock_get_installed_os_version):
         """Test OpenStack version from an uninstalled package is non-fatal"""
         mock_snap_install_requested.return_value = False
-        with patch('apt_pkg.Cache') as cache:
+        mock_get_installed_os_version.return_value = None
+        with patch.object(openstack, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             self.assertEquals(
                 None,
                 openstack.get_os_version_package('foo', fatal=False)
             )
 
+    @patch.object(openstack, 'lsb_release')
     @patch.object(openstack, 'get_os_codename_package')
     @patch('charmhelpers.contrib.openstack.utils.config')
-    def test_os_release_uncached(self, config, get_cn):
+    def test_os_release_uncached(self, config, get_cn, mock_lsb_release):
         openstack._os_rel = None
         get_cn.return_value = 'folsom'
+        mock_lsb_release.return_value = {
+            'DISTRIB_CODENAME': 'bionic',
+        }
         self.assertEquals('folsom', openstack.os_release('nova-common'))
 
-    def test_os_release_cached(self):
+    @patch.object(openstack, 'lsb_release')
+    def test_os_release_cached(self, mock_lsb_release):
         openstack._os_rel = 'foo'
+        mock_lsb_release.return_value = {
+            'DISTRIB_CODENAME': 'bionic',
+        }
         self.assertEquals('foo', openstack.os_release('nova-common'))
 
     @patch.object(openstack, 'juju_log')
@@ -470,7 +537,7 @@ class OpenStackHelpersTestCase(TestCase):
             openstack.configure_installation_source(src)
             ex_cmd = [
                 'add-apt-repository', '--yes', 'ppa:gandelman-a/openstack']
-            mock.assert_called_with(ex_cmd)
+            mock.assert_called_with(ex_cmd, env={})
 
     @patch('subprocess.check_call')
     @patch.object(fetch, 'import_key')
@@ -483,7 +550,7 @@ class OpenStackHelpersTestCase(TestCase):
         _spcc.assert_called_once_with(
             ['add-apt-repository', '--yes',
              'deb http://ubuntu-cloud.archive.canonical.com/ubuntu '
-             'precise-havana main'])
+             'precise-havana main'], env={})
 
     @patch.object(fetch, 'get_distrib_codename')
     @patch(builtin_open)
@@ -504,7 +571,7 @@ class OpenStackHelpersTestCase(TestCase):
         _spcc.assert_called_once_with(
             ['add-apt-repository', '--yes',
              'deb http://archive.ubuntu.com/ubuntu/ precise-proposed '
-             'restricted main multiverse universe'])
+             'restricted main multiverse universe'], env={})
 
     @patch('charmhelpers.fetch.filter_installed_packages')
     @patch('charmhelpers.fetch.apt_install')
@@ -581,7 +648,7 @@ class OpenStackHelpersTestCase(TestCase):
             openstack.configure_installation_source(src)
             cmd = ['add-apt-repository', '-y',
                    'ppa:ubuntu-cloud-archive/folsom-staging']
-            _subp.assert_called_with(cmd)
+            _subp.assert_called_with(cmd, env={})
 
     @patch(builtin_open)
     @patch.object(fetch, 'apt_install')
@@ -1509,6 +1576,17 @@ class OpenStackHelpersTestCase(TestCase):
             self.assertEquals(e.args[0],
                               "Couldn't pause: assess_status_func failed")
 
+    @patch('charmhelpers.contrib.openstack.utils.service_pause')
+    @patch('charmhelpers.contrib.openstack.utils.set_unit_paused')
+    @patch('charmhelpers.contrib.openstack.utils.port_has_listener')
+    def test_pause_unit_retry_port_check_retries(
+            self, port_has_listener, set_unit_paused, service_pause):
+        service_pause.return_value = True
+        port_has_listener.side_effect = [True, False]
+        wait_for_ports_func = openstack.make_wait_for_ports_barrier([77])
+        openstack.pause_unit(None, services=['service1'], ports=[77], charm_func=wait_for_ports_func)
+        port_has_listener.assert_has_calls([call('0.0.0.0', 77), call('0.0.0.0', 77)])
+
     @patch('charmhelpers.contrib.openstack.utils.service_resume')
     @patch('charmhelpers.contrib.openstack.utils.clear_unit_paused')
     def test_resume_unit_okay(self, clear_unit_paused, service_resume):
@@ -1591,6 +1669,10 @@ class OpenStackHelpersTestCase(TestCase):
         _determine_os_workload_status.return_value = ('broken', 'damaged')
         r = f()
         self.assertEquals(r, 'damaged')
+
+    # TODO(ajkavanagh) -- there should be a test for
+    # _determine_os_workload_status() as the policyd override code has changed
+    # it, but there wasn't a test previously.
 
     @patch.object(openstack, 'restart_on_change_helper')
     @patch.object(openstack, 'is_unit_paused_set')
@@ -1734,7 +1816,7 @@ class OpenStackHelpersTestCase(TestCase):
     def test_os_application_version_set(self,
                                         mock_application_version_set,
                                         mock_os_release):
-        with patch('apt_pkg.Cache') as cache:
+        with patch.object(fetch, 'apt_cache') as cache:
             cache.return_value = self._apt_cache()
             mock_os_release.return_value = 'mitaka'
             openstack.os_application_version_set('neutron-common')
@@ -1848,6 +1930,483 @@ class OpenStackHelpersTestCase(TestCase):
         clear_unit_paused.assert_called_once()
         fake_configs.write_all.assert_called_once()
         fake_resume_helper.assert_called_once_with(fake_configs)
+
+    @patch.object(openstack, 'juju_log')
+    @patch.object(openstack, 'leader_get')
+    def test_is_db_initialised(self, leader_get, juju_log):
+        leader_get.return_value = 'True'
+        self.assertTrue(openstack.is_db_initialised())
+        leader_get.return_value = 'False'
+        self.assertFalse(openstack.is_db_initialised())
+        leader_get.return_value = None
+        self.assertFalse(openstack.is_db_initialised())
+
+    @patch.object(openstack, 'juju_log')
+    @patch.object(openstack, 'leader_set')
+    def test_set_db_initialised(self, leader_set, juju_log):
+        openstack.set_db_initialised()
+        leader_set.assert_called_once_with({'db-initialised': True})
+
+    @patch.object(openstack, 'juju_log')
+    @patch.object(openstack, 'relation_ids')
+    @patch.object(openstack, 'related_units')
+    @patch.object(openstack, 'relation_get')
+    def test_is_db_maintenance_mode(self, relation_get, related_units,
+                                    relation_ids, juju_log):
+        relation_ids.return_value = ['rid:1']
+        related_units.return_value = ['unit/0', 'unit/2']
+        rsettings = {
+            'rid:1': {
+                'unit/0': {
+                    'private-ip': '1.2.3.4',
+                    'cluster-series-upgrading': 'True'},
+                'unit/2': {
+                    'private-ip': '1.2.3.5'}}}
+        relation_get.side_effect = lambda unit, rid: rsettings[rid][unit]
+        self.assertTrue(openstack.is_db_maintenance_mode())
+        rsettings = {
+            'rid:1': {
+                'unit/0': {
+                    'private-ip': '1.2.3.4'},
+                'unit/2': {
+                    'private-ip': '1.2.3.5'}}}
+        self.assertFalse(openstack.is_db_maintenance_mode())
+        rsettings = {
+            'rid:1': {
+                'unit/0': {
+                    'private-ip': '1.2.3.4',
+                    'cluster-series-upgrading': 'False'},
+                'unit/2': {
+                    'private-ip': '1.2.3.5'}}}
+        self.assertFalse(openstack.is_db_maintenance_mode())
+        rsettings = {
+            'rid:1': {
+                'unit/0': {
+                    'private-ip': '1.2.3.4',
+                    'cluster-series-upgrading': 'lskjfsd'},
+                'unit/2': {
+                    'private-ip': '1.2.3.5'}}}
+        self.assertFalse(openstack.is_db_maintenance_mode())
+
+    def test_get_endpoint_key(self):
+        self.assertEqual(
+            openstack.get_endpoint_key('placement', 'is:2', 'keystone/0'),
+            'placement-is_2-keystone_0')
+
+    @patch.object(openstack, 'relation_get')
+    @patch.object(openstack, 'related_units')
+    @patch.object(openstack, 'relation_ids')
+    def test_get_endpoint_notifications(self, relation_ids, related_units,
+                                        relation_get):
+        id_svc_rel_units = {
+            'identity-service:3': ['keystone/0', 'keystone/1', 'keystone/2']
+        }
+
+        def _related_units(relid):
+            return id_svc_rel_units[relid]
+
+        id_svc_rel_data = {
+            'keystone/0': {
+                'ep_changed': '{"placement": "d5c3"}'},
+            'keystone/1': {
+                'ep_changed': '{"nova": "4d06", "neutron": "2aa6"}'},
+            'keystone/2': {}}
+
+        def _relation_get(unit, rid, attribute):
+            return id_svc_rel_data[unit].get(attribute)
+
+        relation_ids.return_value = id_svc_rel_units.keys()
+        related_units.side_effect = _related_units
+        relation_get.side_effect = _relation_get
+        self.assertEqual(
+            openstack.get_endpoint_notifications(['neutron']),
+            {
+                'neutron-identity-service_3-keystone_1': '2aa6'})
+        self.assertEqual(
+            openstack.get_endpoint_notifications(['placement', 'neutron']),
+            {
+                'neutron-identity-service_3-keystone_1': '2aa6',
+                'placement-identity-service_3-keystone_0': 'd5c3'})
+
+    @patch.object(openstack, 'get_endpoint_notifications')
+    @patch.object(openstack.unitdata, 'HookData')
+    def test_endpoint_changed(self, HookData, get_endpoint_notifications):
+        self.kv_data = {}
+
+        def _kv_get(key):
+            return self.kv_data.get(key)
+        kv = self._unit_paused_helper(HookData)
+        kv.get.side_effect = _kv_get
+        # Check endpoint_changed returns True when there are new notifications.
+        get_endpoint_notifications.return_value = {
+            'neutron-identity-service_3-keystone_1': '2aa6',
+            'placement-identity-service_3-keystone_0': 'd5c3'}
+        self.assertTrue(openstack.endpoint_changed('placement'))
+        # Check endpoint_changed returns False when there are new
+        # notifications but they are not the ones being looked for.
+        self.assertTrue(openstack.endpoint_changed('nova'))
+        # Check endpoint_changed returns False if the notification
+        # has alredy been seen
+        get_endpoint_notifications.return_value = {
+            'placement-identity-service_3-keystone_0': 'd5c3'}
+        self.kv_data = {
+            'placement-identity-service_3-keystone_0': 'd5c3'}
+        self.assertFalse(openstack.endpoint_changed('placement'))
+
+    @patch.object(openstack, 'get_endpoint_notifications')
+    @patch.object(openstack.unitdata, 'HookData')
+    def test_save_endpoint_changed_triggers(self, HookData,
+                                            get_endpoint_notifications):
+        kv = self._unit_paused_helper(HookData)
+        get_endpoint_notifications.return_value = {
+            'neutron-identity-service_3-keystone_1': '2aa6',
+            'placement-identity-service_3-keystone_0': 'd5c3'}
+        openstack.save_endpoint_changed_triggers(['neutron', 'placement'])
+        kv_set_calls = [
+            call('neutron-identity-service_3-keystone_1', '2aa6'),
+            call('placement-identity-service_3-keystone_0', 'd5c3')]
+        kv.set.assert_has_calls(kv_set_calls, any_order=True)
+
+
+class OpenStackUtilsAdditionalTests(TestCase):
+    SHARED_DB_RELATIONS = {
+        'shared-db:8': {
+            'mysql-svc1/0': {
+                'allowed_units': 'client/0',
+            },
+            'mysql-svc1/1': {},
+            'mysql-svc1/2': {
+                'allowed_units': 'client/0 client/1',
+            },
+        },
+        'shared-db:12': {
+            'mysql-svc2/0': {
+                'allowed_units': 'client/1',
+            },
+            'mysql-svc2/1': {
+                'allowed_units': 'client/3',
+            },
+            'mysql-svc2/2': {
+                'allowed_units': {},
+            },
+        }
+    }
+    SCALE_RELATIONS = {
+        'cluster:2': {
+            'keystone/1': {},
+            'keystone/2': {}},
+        'shared-db:12': {
+            'mysql-svc2/0': {
+                'allowed_units': 'client/1',
+            },
+            'mysql-svc2/1': {
+                'allowed_units': 'client/3',
+            },
+            'mysql-svc2/2': {
+                'allowed_units': {},
+            }},
+    }
+    SCALE_RELATIONS_HA = {
+        'cluster:2': {
+            'keystone/1': {'unit-state-keystone-1': 'READY'},
+            'keystone/2': {}},
+        'shared-db:12': {
+            'mysql-svc2/0': {
+                'allowed_units': 'client/1',
+            },
+            'mysql-svc2/1': {
+                'allowed_units': 'client/3',
+            },
+            'mysql-svc2/2': {
+                'allowed_units': {},
+            }},
+        'ha:32': {
+            'hacluster-keystone/1': {}}
+    }
+    All_PEERS_READY = {
+        'cluster:2': {
+            'keystone/1': {'unit-state-keystone-1': 'READY'},
+            'keystone/2': {'unit-state-keystone-2': 'READY'}}}
+    PEERS_NOT_READY = {
+        'cluster:2': {
+            'keystone/1': {'unit-state-keystone-1': 'READY'},
+            'keystone/2': {}}}
+
+    def setUp(self):
+        super(OpenStackUtilsAdditionalTests, self).setUp()
+        [self._patch(m) for m in [
+            'expect_ha',
+            'expected_peer_units',
+            'expected_related_units',
+            'juju_log',
+            'metadata',
+            'related_units',
+            'relation_get',
+            'relation_id',
+            'relation_ids',
+            'relation_set',
+            'local_unit',
+        ]]
+
+    def _patch(self, method):
+        _m = patch.object(openstack, method)
+        mock = _m.start()
+        self.addCleanup(_m.stop)
+        setattr(self, method, mock)
+
+    def setup_relation(self, relation_map):
+        relation = FakeRelation(relation_map)
+        self.relation_id.side_effect = relation.relation_id
+        self.relation_get.side_effect = relation.get
+        self.relation_ids.side_effect = relation.relation_ids
+        self.related_units.side_effect = relation.related_units
+        return relation
+
+    def test_is_db_ready(self):
+        relation = self.setup_relation(self.SHARED_DB_RELATIONS)
+
+        # Check unit allowed in 1st relation
+        self.local_unit.return_value = 'client/0'
+        self.assertTrue(openstack.is_db_ready())
+
+        # Check unit allowed in 2nd relation
+        self.local_unit.return_value = 'client/3'
+        self.assertTrue(openstack.is_db_ready())
+
+        # Check unit not allowed in any list
+        self.local_unit.return_value = 'client/5'
+        self.assertFalse(openstack.is_db_ready())
+
+        # Check call with an invalid relation
+        self.local_unit.return_value = 'client/3'
+        # None returned if not in a relation context (eg update-status)
+        relation.clear_relation_context()
+        self.assertRaises(
+            Exception,
+            openstack.is_db_ready,
+            use_current_context=True)
+
+        # Check unit allowed using current relation context
+        relation.set_relation_context('mysql-svc2/0', 'shared-db:12')
+        self.local_unit.return_value = 'client/1'
+        self.assertTrue(openstack.is_db_ready(use_current_context=True))
+
+        # Check unit not allowed using current relation context
+        relation.set_relation_context('mysql-svc2/0', 'shared-db:12')
+        self.local_unit.return_value = 'client/0'
+        self.assertFalse(openstack.is_db_ready(use_current_context=True))
+
+    @patch.object(openstack, 'container_scoped_relations')
+    def test_is_expected_scale_noha(self, container_scoped_relations):
+        self.setup_relation(self.SCALE_RELATIONS)
+        self.expect_ha.return_value = False
+        eru = {
+            'shared-db': ['mysql/0', 'mysql/1', 'mysql/2']}
+
+        def _expected_related_units(reltype):
+            return eru[reltype]
+        self.expected_related_units.side_effect = _expected_related_units
+        container_scoped_relations.return_value = ['ha', 'domain-backend']
+
+        # All peer and db units are present
+        self.expected_peer_units.return_value = ['keystone/0', 'keystone/2']
+        self.assertTrue(openstack.is_expected_scale())
+
+        # db units are present but a peer is missing
+        self.expected_peer_units.return_value = ['keystone/0', 'keystone/2', 'keystone/3']
+        self.assertFalse(openstack.is_expected_scale())
+
+        # peer units are present but a db unit is missing
+        eru['shared-db'].append('mysql/3')
+        self.expected_peer_units.return_value = ['keystone/0', 'keystone/2']
+        self.assertFalse(openstack.is_expected_scale())
+        eru['shared-db'].remove('mysql/3')
+
+        # Expect ha but ha unit is missing
+        self.expect_ha.return_value = True
+        self.expected_peer_units.return_value = ['keystone/0', 'keystone/2']
+        self.assertFalse(openstack.is_expected_scale())
+
+    @patch.object(openstack, 'container_scoped_relations')
+    def test_is_expected_scale_ha(self, container_scoped_relations):
+        self.setup_relation(self.SCALE_RELATIONS_HA)
+        eru = {
+            'shared-db': ['mysql/0', 'mysql/1', 'mysql/2']}
+
+        def _expected_related_units(reltype):
+            return eru[reltype]
+        self.expected_related_units.side_effect = _expected_related_units
+        container_scoped_relations.return_value = ['ha', 'domain-backend']
+        self.expect_ha.return_value = True
+        self.expected_peer_units.return_value = ['keystone/0', 'keystone/2']
+        self.assertTrue(openstack.is_expected_scale())
+
+    def test_container_scoped_relations(self):
+        _metadata = {
+            'provides': {
+                'amqp': {'interface': 'rabbitmq'},
+                'identity-service': {'interface': 'keystone'},
+                'ha': {
+                    'interface': 'hacluster',
+                    'scope': 'container'}},
+            'peers': {
+                'cluster': {'interface': 'openstack-ha'}}}
+        self.metadata.return_value = _metadata
+        self.assertEqual(openstack.container_scoped_relations(), ['ha'])
+
+    def test_get_peer_key(self):
+        self.assertEqual(
+            openstack.get_peer_key('cinder/0'),
+            'unit-state-cinder-0')
+
+    def test_inform_peers_unit_state(self):
+        self.local_unit.return_value = 'client/0'
+        self.setup_relation(self.All_PEERS_READY)
+        openstack.inform_peers_unit_state('READY')
+        self.relation_set.assert_called_once_with(
+            relation_id='cluster:2',
+            relation_settings={'unit-state-client-0': 'READY'})
+
+    def test_get_peers_unit_state(self):
+        self.setup_relation(self.All_PEERS_READY)
+        self.assertEqual(
+            openstack.get_peers_unit_state(),
+            {'keystone/1': 'READY', 'keystone/2': 'READY'})
+        self.setup_relation(self.PEERS_NOT_READY)
+        self.assertEqual(
+            openstack.get_peers_unit_state(),
+            {'keystone/1': 'READY', 'keystone/2': 'UNKNOWN'})
+
+    def test_are_peers_ready(self):
+        self.setup_relation(self.All_PEERS_READY)
+        self.assertTrue(openstack.are_peers_ready())
+        self.setup_relation(self.PEERS_NOT_READY)
+        self.assertFalse(openstack.are_peers_ready())
+
+    @patch.object(openstack, 'inform_peers_unit_state')
+    def test_inform_peers_if_ready(self, inform_peers_unit_state):
+        self.setup_relation(self.All_PEERS_READY)
+
+        def _not_ready():
+            return False, "Its all gone wrong"
+
+        def _ready():
+            return True, "Hurray!"
+        openstack.inform_peers_if_ready(_not_ready)
+        inform_peers_unit_state.assert_called_once_with('NOTREADY', 'cluster')
+        inform_peers_unit_state.reset_mock()
+        openstack.inform_peers_if_ready(_ready)
+        inform_peers_unit_state.assert_called_once_with('READY', 'cluster')
+
+    @patch.object(openstack, 'is_expected_scale')
+    @patch.object(openstack, 'is_db_initialised')
+    @patch.object(openstack, 'is_db_ready')
+    @patch.object(openstack, 'is_unit_paused_set')
+    @patch.object(openstack, 'is_db_maintenance_mode')
+    def test_check_api_unit_ready(self, is_db_maintenance_mode,
+                                  is_unit_paused_set, is_db_ready,
+                                  is_db_initialised, is_expected_scale):
+        is_db_maintenance_mode.return_value = True
+        self.assertFalse(openstack.check_api_unit_ready()[0])
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = True
+        self.assertFalse(openstack.check_api_unit_ready()[0])
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = False
+        self.assertFalse(openstack.check_api_unit_ready()[0])
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = True
+        is_db_initialised.return_value = False
+        self.assertFalse(openstack.check_api_unit_ready()[0])
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = True
+        is_db_initialised.return_value = True
+        is_expected_scale.return_value = False
+        self.assertFalse(openstack.check_api_unit_ready()[0])
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = True
+        is_db_initialised.return_value = True
+        is_expected_scale.return_value = True
+        self.assertTrue(openstack.check_api_unit_ready()[0])
+
+    @patch.object(openstack, 'is_expected_scale')
+    @patch.object(openstack, 'is_db_initialised')
+    @patch.object(openstack, 'is_db_ready')
+    @patch.object(openstack, 'is_unit_paused_set')
+    @patch.object(openstack, 'is_db_maintenance_mode')
+    def test_get_api_unit_status(self, is_db_maintenance_mode,
+                                 is_unit_paused_set, is_db_ready,
+                                 is_db_initialised, is_expected_scale):
+        is_db_maintenance_mode.return_value = True
+        self.assertEqual(
+            openstack.get_api_unit_status()[0].value,
+            'maintenance')
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = True
+        self.assertEqual(
+            openstack.get_api_unit_status()[0].value,
+            'blocked')
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = False
+        self.assertEqual(
+            openstack.get_api_unit_status()[0].value,
+            'waiting')
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = True
+        is_db_initialised.return_value = False
+        self.assertEqual(
+            openstack.get_api_unit_status()[0].value,
+            'waiting')
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = True
+        is_db_initialised.return_value = True
+        is_expected_scale.return_value = False
+        self.assertEqual(
+            openstack.get_api_unit_status()[0].value,
+            'waiting')
+
+        is_db_maintenance_mode.return_value = False
+        is_unit_paused_set.return_value = False
+        is_db_ready.return_value = True
+        is_db_initialised.return_value = True
+        is_expected_scale.return_value = True
+        self.assertEqual(
+            openstack.get_api_unit_status()[0].value,
+            'active')
+
+    @patch.object(openstack, 'get_api_unit_status')
+    def test_check_api_application_ready(self, get_api_unit_status):
+        get_api_unit_status.return_value = (WORKLOAD_STATES.ACTIVE, 'Hurray')
+        self.assertTrue(openstack.check_api_application_ready()[0])
+        get_api_unit_status.return_value = (WORKLOAD_STATES.BLOCKED, ':-(')
+        self.assertFalse(openstack.check_api_application_ready()[0])
+
+    @patch.object(openstack, 'get_api_unit_status')
+    def test_get_api_application_status(self, get_api_unit_status):
+        get_api_unit_status.return_value = (WORKLOAD_STATES.ACTIVE, 'Hurray')
+        self.assertEqual(
+            openstack.get_api_application_status()[0].value,
+            'active')
+        get_api_unit_status.return_value = (WORKLOAD_STATES.BLOCKED, ':-(')
+        self.assertEqual(
+            openstack.get_api_application_status()[0].value,
+            'blocked')
 
 
 if __name__ == '__main__':

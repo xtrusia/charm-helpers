@@ -6,6 +6,7 @@ import tempfile
 import types
 from mock import call, MagicMock, mock_open, patch, sentinel
 from testtools import TestCase
+from enum import Enum
 import yaml
 
 import six
@@ -65,21 +66,26 @@ class ConfigTest(TestCase):
         d = dict(foo='bar')
         c = hookenv.Config(d)
 
-        with open(c.path, 'w') as f:
+        state_path = os.path.join(self.charm_dir, hookenv.Config.CONFIG_FILE_NAME)
+        with open(state_path, 'w') as f:
             f.close()
 
         self.assertEqual(c['foo'], 'bar')
         self.assertEqual(c._prev_dict, None)
+        self.assertEqual(c.path, state_path)
 
     def test_init_invalid_state_file(self):
         d = dict(foo='bar')
-        c = hookenv.Config(d)
 
-        with open(c.path, 'w') as f:
+        state_path = os.path.join(self.charm_dir, hookenv.Config.CONFIG_FILE_NAME)
+        with open(state_path, 'w') as f:
             f.write('blah')
+
+        c = hookenv.Config(d)
 
         self.assertEqual(c['foo'], 'bar')
         self.assertEqual(c._prev_dict, None)
+        self.assertEqual(c.path, state_path)
 
     def test_load_previous(self):
         d = dict(foo='bar')
@@ -338,6 +344,16 @@ class HelpersTest(TestCase):
         for level in alternative_levels:
             hookenv.log('foo', level)
             mock_call.assert_called_with(['juju-log', '-l', level, 'foo'])
+
+    @patch('subprocess.call')
+    def test_function_log_message(self, mock_call):
+        hookenv.function_log('foo')
+        mock_call.assert_called_with(['function-log', 'foo'])
+
+    @patch('subprocess.call')
+    def test_function_log_message_object(self, mock_call):
+        hookenv.function_log(object)
+        mock_call.assert_called_with(['function-log', repr(object)])
 
     @patch('charmhelpers.core.hookenv._cache_config', None)
     @patch('charmhelpers.core.hookenv.charm_dir')
@@ -1278,7 +1294,7 @@ class HelpersTest(TestCase):
         self.assertEqual("--file", command[1])
         temp_file = command[2]
         with open(temp_file, "r") as f:
-            self.assertEqual("{foo: bar}", f.read().strip())
+            self.assertEqual("foo: bar", f.read().strip())
         remove.assert_called_with(temp_file)
 
     @patch('charmhelpers.core.hookenv.local_unit', MagicMock())
@@ -1306,7 +1322,7 @@ class HelpersTest(TestCase):
         self.assertEqual("--file", command[1])
         temp_file = command[2]
         with open(temp_file, "r") as f:
-            self.assertEqual("{foo: '{''bar'': 1}'}", f.read().strip())
+            self.assertEqual("foo: '{''bar'': 1}'", f.read().strip())
         remove.assert_called_with(temp_file)
 
     def test_lists_relation_types(self):
@@ -1807,14 +1823,87 @@ class HooksTest(TestCase):
         hookenv.action_fail(message)
         check_call.assert_called_with(['action-fail', message])
 
+    @patch('charmhelpers.core.hookenv.cmd_exists')
+    @patch('subprocess.check_output')
+    def test_function_get_with_key(self, check_output, cmd_exists):
+        function_data = 'bar'
+        check_output.return_value = json.dumps(function_data).encode('UTF-8')
+        cmd_exists.return_value = True
+
+        result = hookenv.function_get(key='foo')
+
+        self.assertEqual(result, 'bar')
+        check_output.assert_called_with(['function-get', 'foo', '--format=json'])
+
+    @patch('charmhelpers.core.hookenv.cmd_exists')
+    @patch('subprocess.check_output')
+    def test_function_get_without_key(self, check_output, cmd_exists):
+        check_output.return_value = json.dumps(dict(foo='bar')).encode('UTF-8')
+        cmd_exists.return_value = True
+
+        result = hookenv.function_get()
+
+        self.assertEqual(result['foo'], 'bar')
+        check_output.assert_called_with(['function-get', '--format=json'])
+
+    @patch('subprocess.check_call')
+    def test_function_set(self, check_call):
+        values = {'foo': 'bar', 'fooz': 'barz'}
+        hookenv.function_set(values)
+        # The order of the key/value pairs can change, so sort them before test
+        called_args = check_call.call_args_list[0][0][0]
+        called_args.pop(0)
+        called_args.sort()
+        self.assertEqual(called_args, ['foo=bar', 'fooz=barz'])
+
+    @patch('charmhelpers.core.hookenv.cmd_exists')
+    @patch('subprocess.check_call')
+    def test_function_fail(self, check_call, cmd_exists):
+        cmd_exists.return_value = True
+
+        message = "Ooops, the function failed"
+        hookenv.function_fail(message)
+        check_call.assert_called_with(['function-fail', message])
+
     def test_status_set_invalid_state(self):
         self.assertRaises(ValueError, hookenv.status_set, 'random', 'message')
+
+    def test_status_set_invalid_state_enum(self):
+
+        class RandomEnum(Enum):
+            FOO = 1
+        self.assertRaises(
+            ValueError,
+            hookenv.status_set,
+            RandomEnum.FOO,
+            'message')
 
     @patch('subprocess.call')
     def test_status(self, call):
         call.return_value = 0
         hookenv.status_set('active', 'Everything is Awesome!')
         call.assert_called_with(['status-set', 'active', 'Everything is Awesome!'])
+
+    @patch('subprocess.call')
+    def test_status_enum(self, call):
+        call.return_value = 0
+        hookenv.status_set(
+            hookenv.WORKLOAD_STATES.ACTIVE,
+            'Everything is Awesome!')
+        call.assert_called_with(['status-set', 'active', 'Everything is Awesome!'])
+
+    @patch('subprocess.call')
+    def test_status_app(self, call):
+        call.return_value = 0
+        hookenv.status_set(
+            'active',
+            'Everything is Awesome!',
+            application=True)
+        call.assert_called_with([
+            'status-set',
+            '--application',
+            'active',
+            'Everything is Awesome!'])
 
     @patch('subprocess.call')
     @patch.object(hookenv, 'log')
