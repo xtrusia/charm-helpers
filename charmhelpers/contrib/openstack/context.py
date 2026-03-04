@@ -708,6 +708,9 @@ class HAProxyContext(OSContextGenerator):
         if config('haproxy-connect-timeout'):
             ctxt['haproxy_connect_timeout'] = config('haproxy-connect-timeout')
 
+        if config('haproxy-enable-proxyv2'):
+            ctxt['haproxy_enable_proxyv2'] = True
+
         if config('prefer-ipv6'):
             ctxt['local_host'] = 'ip6-localhost'
             ctxt['haproxy_host'] = '::'
@@ -788,7 +791,8 @@ class ApacheSSLContext(OSContextGenerator):
     service_namespace = None
 
     def enable_modules(self):
-        cmd = ['a2enmod', 'ssl', 'proxy', 'proxy_http', 'headers']
+        # NOTE(seyeongkim) : remoteip is for proxy protocol v2
+        cmd = ['a2enmod', 'ssl', 'proxy', 'proxy_http', 'headers', 'remoteip']
         check_call(cmd)
 
     def configure_cert(self, cn=None):
@@ -915,6 +919,8 @@ class ApacheSSLContext(OSContextGenerator):
                 ctxt['ext_ports'].append(int(ext_port))
 
         ctxt['ext_ports'] = sorted(list(set(ctxt['ext_ports'])))
+        if config('haproxy-enable-proxyv2'):
+            ctxt['haproxy_enable_proxyv2'] = True
         return ctxt
 
 
@@ -1396,8 +1402,16 @@ class WSGIWorkerConfigContext(WorkerConfigContext):
         self.admin_process_weight = admin_process_weight
         self.public_process_weight = public_process_weight
 
+    def enable_modules(self):
+        # NOTE(seyeongkim): this is for proxy protocol v2 and non ssl case.
+        cmd = ['a2enmod', 'remoteip']
+        check_call(cmd)
+
     def __call__(self):
         total_processes = _calculate_workers()
+
+        self.enable_modules()
+
         ctxt = {
             "service_name": self.service_name,
             "user": self.user,
@@ -1412,6 +1426,8 @@ class WSGIWorkerConfigContext(WorkerConfigContext):
                                               total_processes)),
             "threads": 1,
         }
+        if config('haproxy-enable-proxyv2'):
+            ctxt['haproxy_enable_proxyv2'] = True
         return ctxt
 
 
